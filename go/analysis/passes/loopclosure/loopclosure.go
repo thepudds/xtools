@@ -8,6 +8,7 @@ package loopclosure
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 
 	"golang.org/x/tools/go/analysis"
@@ -165,8 +166,15 @@ func lastStmts(pass *analysis.Pass, stmts []ast.Stmt) []ast.Stmt {
 		return nil
 	}
 
+	var s ast.Stmt
+	for len(stmts) > 0 {
+		s, stmts = stmts[len(stmts)-1], stmts[:len(stmts)-1]
+		if !isBoringStmt(pass.TypesInfo, s) {
+			break
+		}
+	}
+
 	var res []ast.Stmt
-	s := stmts[len(stmts)-1]
 	switch s := s.(type) {
 	case *ast.IfStmt:
 		var next *ast.IfStmt
@@ -212,6 +220,94 @@ func lastStmts(pass *analysis.Pass, stmts []ast.Stmt) []ast.Stmt {
 	}
 
 	return res
+}
+
+// isBoringStmt checks if a statement is unable to render
+// a captured loop variable reference benign.
+// For statements with bodies such as an if statement, it
+// recursively checks if statements within the body are all boring,
+// and reports the parent statement as boring if so.
+// Statements it does not understand are reported as not boring.
+// WIP: currently rough proof of concept...
+func isBoringStmt(info *types.Info, stmt ast.Stmt) bool {
+	// TODO: definition of "boring" should be different between a defer vs go statement...
+	// TODO: consider if these examples are correct
+	// TODO: consider adding others
+	// TODO: consider flipping the sense of the return bool, rename isInteresting or similar
+	switch s := stmt.(type) {
+	case *ast.BranchStmt:
+		if s.Tok == token.CONTINUE || s.Tok == token.BREAK {
+			return true
+		}
+	case *ast.IncDecStmt:
+		return true
+	case *ast.ExprStmt:
+		if call, ok := s.X.(*ast.CallExpr); ok {
+			// panic with boring args is currently the only boring call.
+			// TODO: consider if our func lit is from defer
+			if isBoringExpr(info, call) {
+				return true
+			}
+		}
+	case *ast.IfStmt:
+		// TODO: proof of concept here
+		if !isBoringExpr(info, s.Cond) {
+			return false
+		}
+		var next *ast.IfStmt
+		for ; s != nil; s, next = next, nil {
+			for i := range s.Body.List {
+				if !isBoringStmt(info, s.Body.List[i]) {
+					return false
+				}
+			}
+			switch e := s.Else.(type) {
+			case *ast.BlockStmt:
+				for i := range e.List {
+					if !isBoringStmt(info, e.List[i]) {
+						return false
+					}
+				}
+			case *ast.IfStmt:
+				next = e
+			}
+		}
+		return true
+	}
+	// We default to false if we don't have specific knowledge of a statement.
+	return false
+}
+
+// isBoringExpr is like isBoringStmt, but for expressions.
+// WIP: currently rough proof of concept...
+func isBoringExpr(info *types.Info, expr ast.Expr) bool {
+	switch x := expr.(type) {
+	case *ast.BasicLit:
+		return true
+	case *ast.CallExpr:
+		f := typeutil.Callee(info, x)
+		if b, ok := f.(*types.Builtin); ok {
+			if b.Name() == "panic" {
+				for _, arg := range x.Args {
+					if !isBoringExpr(info, arg) {
+						return false
+					}
+				}
+				return true
+			}
+		}
+	case *ast.BinaryExpr:
+		if isBoringExpr(info, x.X) && isBoringExpr(info, x.Y) {
+			return true
+		}
+		return false
+	case *ast.ParenExpr:
+		return isBoringExpr(info, x.X)
+	case *ast.Ident:
+		return true
+	}
+	// We default to false if we don't have specific knowledge of an expression.
+	return false
 }
 
 // litStmts returns all statements from the function body of a function

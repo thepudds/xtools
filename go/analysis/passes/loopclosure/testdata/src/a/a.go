@@ -19,6 +19,11 @@ func _() {
 			println(i) // want "loop variable i captured by func literal"
 			println(v) // want "loop variable v captured by func literal"
 		}()
+		if i < 1 {
+			continue
+		} else if i < 2 {
+			break
+		}
 	}
 	for i, v := range s {
 		defer func() {
